@@ -38,16 +38,13 @@ def clean(text, limit):
 
 
 def images(value):
-    value = (value or "").strip()
-    if not value:
-        return []
-    try:
-        data = json.loads(value)
-        if isinstance(data, list):
-            return [str(u).strip() for u in data if str(u).strip().startswith("http")]
-    except ValueError:
-        pass
-    return [u.strip() for u in re.split(r"[,\s]+", value) if u.strip().startswith("http")]
+    """Extrage toate linkurile http(s) din camp, indiferent de format (lista JSON, lista Python, text)."""
+    found = re.findall(r"https?://[^\s'\"\]\[,<>]+", str(value or "").replace("\\/", "/"))
+    seen, out = set(), []
+    for u in found:
+        if u not in seen:
+            seen.add(u); out.append(u)
+    return out
 
 
 def price_eur(value):
@@ -72,17 +69,35 @@ def condition(row):
     return "new" if year >= date.today().year - 1 else "used"
 
 
+def norm_avail(v):
+    v = (v or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if v in ("sold", "pending", "off_market", "out_of_stock"):
+        return None
+    if "rent" in v:
+        return "for_rent"
+    if "sale" in v or v in ("in_stock", "available", "active"):
+        return "for_sale"
+    return None
+
+
 def convert(rows):
-    out, skipped = [], 0
+    out, reasons = [], {"disponibilitate": 0, "poza": 0, "pret": 0, "link": 0, "titlu": 0}
     for r in rows:
-        avail = (r.get("availability") or "").strip().lower()
+        avail = norm_avail(r.get("availability"))
         imgs = images(r.get("image"))
         price = price_eur(r.get("price"))
         link = (r.get("url") or "").strip()
         title = clean(r.get("name"), 150)
-        if avail not in ("for_sale", "for_rent") or not (imgs and price and link and title):
-            skipped += 1
-            continue
+        if not avail:
+            reasons["disponibilitate"] += 1; continue
+        if not imgs:
+            reasons["poza"] += 1; continue
+        if not price:
+            reasons["pret"] += 1; continue
+        if not link.startswith("http"):
+            reasons["link"] += 1; continue
+        if not title:
+            reasons["titlu"] += 1; continue
         rent = avail == "for_rent"
         if rent:
             title = clean(title + " – închiriere (preț/lună)", 200)
@@ -105,7 +120,14 @@ def convert(rows):
             "custom_label_0": "inchiriere" if rent else "vanzare",
             "custom_label_1": (r.get("property_type") or "").lower(),
         })
-    return out, skipped
+    return out, reasons
+
+
+def debug(rows, reasons):
+    print("DIAGNOSTIC:", len(rows), "randuri in sursa; motive de omitere:", reasons)
+    print("Coloane:", list(rows[0].keys())[:40])
+    for r in rows[:3]:
+        print("  -", {k: (str(r.get(k))[:90]) for k in ("home_listing_id", "availability", "price", "url", "image")})
 
 
 def main():
@@ -117,8 +139,10 @@ def main():
     rows = list(csv.DictReader(io.StringIO(text)))
     if not rows or "home_listing_id" not in rows[0]:
         sys.exit("EROARE: sursa nu are formatul asteptat (lipseste home_listing_id). Feedul NU a fost actualizat.")
-    items, skipped = convert(rows)
+    items, reasons = convert(rows)
+    skipped = sum(reasons.values())
     if not items:
+        debug(rows, reasons)
         sys.exit("EROARE: nicio proprietate valida. Feedul NU a fost actualizat.")
     import os
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
